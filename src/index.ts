@@ -80,14 +80,26 @@ const plugin: Plugin = async (input) => {
   if (!isWorktreeInstance(input.directory)) {
     log("init:recovery:start (main instance)")
 
-    // Run before anything else that reads t.status = 'active' -- a team whose
-    // lead session was deleted externally (not via team_cleanup) stays 'active'
-    // forever otherwise, blocking team_create/team_cleanup for that name across
-    // restarts. See recoverOrphanedTeams' own doc comment for the full mechanism.
-    const orphanedTeams = await recoverOrphanedTeams(db, client, input.directory, registry)
-    if (orphanedTeams.archived > 0) {
-      log(`init:recovery:orphaned-teams-archived=${orphanedTeams.archived}`)
-    }
+    // Reconciles teams whose lead session was deleted externally (not via
+    // team_cleanup) -- otherwise they stay 'active' forever, blocking
+    // team_create/team_cleanup for that name across restarts. See
+    // recoverOrphanedTeams' own doc comment for the full mechanism.
+    //
+    // Fire-and-forget, NOT awaited: isSessionAlive() calls client.session.get(),
+    // an HTTP call back to this same server. Awaiting it synchronously here --
+    // before the server has finished bootstrapping -- reproduced a real,
+    // confirmed deadlock (server never responds to ANY request, including
+    // unrelated ones like /config) when a stale team from a prior run exists
+    // for this project. Matches the existing pattern for the other three
+    // non-critical recovery passes below, and the documented reason
+    // recoverStaleMembers is skipped entirely for worktree instances two lines
+    // up ("makes HTTP calls back to the server, which deadlocks"). isSessionAlive
+    // itself also carries a bounded timeout as defense in depth.
+    recoverOrphanedTeams(db, client, input.directory, registry).then((result) => {
+      if (result.archived > 0) log(`init:recovery:orphaned-teams-archived=${result.archived}`)
+    }).catch((err) => {
+      log(`init:recover-orphaned-teams:failed err=${err instanceof Error ? err.message : String(err)}`)
+    })
 
     const recovery = await recoverStaleMembers(db, client, input.directory)
     if (recovery.interrupted > 0) {

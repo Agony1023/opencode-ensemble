@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { applyMigrations } from "../src/schema"
-import { recoverStaleMembers, recoverUndeliveredMessages, rehydrateRegistry, recoverOrphanedTeams } from "../src/recovery"
+import { recoverStaleMembers, recoverUndeliveredMessages, rehydrateRegistry, recoverOrphanedTeams, isSessionAlive } from "../src/recovery"
 import type { PluginClient } from "../src/types"
 import { MemberRegistry } from "../src/state"
 import { sendMessage, broadcastMessage } from "../src/messaging"
@@ -71,6 +71,43 @@ function mockClient(): PluginClient & { calls: Array<{ method: string; args: unk
     },
   }
 }
+
+describe("isSessionAlive", () => {
+  let client: ReturnType<typeof mockClient>
+
+  beforeEach(() => {
+    client = mockClient()
+  })
+
+  test("returns true when session.get resolves", async () => {
+    client.session.get = async () => ({ data: {} })
+    expect(await isSessionAlive(client, "sess-1", 50)).toBe(true)
+  })
+
+  test("returns false when session.get throws", async () => {
+    client.session.get = async () => { throw new Error("session not found") }
+    expect(await isSessionAlive(client, "sess-1", 50)).toBe(false)
+  })
+
+  // Regression: a session.get() call made from within this plugin's own init
+  // sequence, before the server has finished bootstrapping, was confirmed to
+  // hang indefinitely rather than resolve or reject -- a self-referential
+  // HTTP-call deadlock, the same class team-spawn.ts's withTimeout already
+  // guards against for worktree.create/session.create. Live-reproduced
+  // 2026-08-17: a real server never responded to ANY request (including
+  // unrelated ones) when a stale team from a prior run existed for the
+  // project. isSessionAlive must resolve within its bound regardless of
+  // whether the underlying call ever settles, and must treat "we genuinely
+  // don't know" as alive (don't archive on an inconclusive check) rather than
+  // as dead.
+  test("resolves within the timeout bound instead of hanging when session.get never settles", async () => {
+    client.session.get = () => new Promise(() => { /* never resolves or rejects */ })
+    const start = Date.now()
+    const result = await isSessionAlive(client, "sess-1", 50)
+    expect(Date.now() - start).toBeLessThan(1000)
+    expect(result).toBe(true)
+  })
+})
 
 describe("recoverOrphanedTeams", () => {
   let db: Database

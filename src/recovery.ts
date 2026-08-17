@@ -10,12 +10,30 @@ import { runCommand } from "./process"
  * Whether a session still exists in OpenCode. `client.session.get` throws for a
  * deleted/unknown session rather than returning empty data -- see dashboard.ts's
  * existing best-effort usage of the same call.
+ *
+ * Bounded by a timeout: a `session.get` call made from within this plugin's own
+ * init sequence, before the server has finished bootstrapping, can hang the
+ * request indefinitely rather than resolve or reject -- the same class of
+ * self-referential-HTTP-call deadlock team-spawn.ts's own `withTimeout` exists
+ * to guard against for `worktree.create`/`session.create` ("makes HTTP calls
+ * back to the server, which deadlocks because the server is still handling
+ * session.create"). On timeout, treat liveness as UNKNOWN (return true, i.e.
+ * "assume alive, don't archive") rather than assuming dead -- a false negative
+ * here just means the orphan isn't reconciled this pass; a false positive means
+ * archiving a team that might still be genuinely active.
  */
-export async function isSessionAlive(client: PluginClient, sessionId: string): Promise<boolean> {
+export async function isSessionAlive(client: PluginClient, sessionId: string, timeoutMs = 5000): Promise<boolean> {
   try {
-    await client.session.get({ sessionID: sessionId })
+    await Promise.race([
+      client.session.get({ sessionID: sessionId }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("isSessionAlive timed out")), timeoutMs)),
+    ])
     return true
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && err.message === "isSessionAlive timed out") {
+      log(`recovery:team:liveness-check-timeout session=${sessionId}`)
+      return true
+    }
     return false
   }
 }
