@@ -85,8 +85,19 @@ export async function recoverOrphanedTeams(
  * Preserves worktree branches before aborting orphaned sessions.
  * Only processes members in active teams.
  * Returns the count of interrupted members.
+ *
+ * `abortTimeoutMs` bounds each `client.session.abort()` call -- the same
+ * self-referential-HTTP-call-back-to-this-server shape as
+ * `isSessionAlive()`'s `client.session.get()` (see that function's doc
+ * comment for the full deadlock mechanism, confirmed live 2026-08-17). This
+ * function is awaited synchronously in plugin init (unlike
+ * `recoverOrphanedTeams`, which is fire-and-forget) because
+ * `rehydrateRegistry` depends on it completing first, so a bounded timeout on
+ * the network call -- not restructuring the await -- is the fix here: the
+ * DB-only work (marking members 'error') always completes and is reflected in
+ * the returned count regardless of whether any individual abort call settles.
  */
-export async function recoverStaleMembers(db: Database, client?: PluginClient, cwd?: string): Promise<{ interrupted: number }> {
+export async function recoverStaleMembers(db: Database, client?: PluginClient, cwd?: string, abortTimeoutMs = 5000): Promise<{ interrupted: number }> {
   // Find stale members with branch info so we can preserve before aborting
   const stale = db.query(
     `SELECT tm.session_id, tm.worktree_branch, tm.name, tm.team_id, t.name as team_name, p.name as project_name
@@ -118,8 +129,16 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
         }
       }
       try {
-        await client.session.abort({ sessionID: member.session_id })
-      } catch { /* best effort */ }
+        await Promise.race([
+          client.session.abort({ sessionID: member.session_id }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("session.abort timed out")), abortTimeoutMs)),
+        ])
+      } catch (err) {
+        if (err instanceof Error && err.message === "session.abort timed out") {
+          log(`recovery:stale-members:abort-timeout session=${member.session_id}`)
+        }
+        /* best effort */
+      }
     }
   }
 

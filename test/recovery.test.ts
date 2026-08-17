@@ -239,6 +239,35 @@ describe("recoverStaleMembers", () => {
     expect(bob.status).toBe("error")
   })
 
+  // Regression: client.session.abort() is the same self-referential-HTTP-call
+  // shape as isSessionAlive()'s client.session.get() (recoverOrphanedTeams'
+  // deadlock, fixed 2026-08-17) -- a call back to this same server, made
+  // synchronously from within plugin init before the server has finished
+  // bootstrapping. recoverStaleMembers is awaited synchronously in index.ts
+  // (unlike recoverOrphanedTeams, which is now fire-and-forget) specifically
+  // because rehydrateRegistry depends on it completing first -- so the fix
+  // here is a bounded timeout on the abort call itself, not fire-and-forget.
+  // Confirmed via source review this is a live latent bug, not exercised by
+  // any test data so far only because it requires a genuinely 'busy' member
+  // at restart time, a query-filter coincidence rather than a structural
+  // guard against the underlying deadlock class.
+  test("does not hang forever if session.abort never settles", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    client.session.abort = () => new Promise(() => { /* never resolves or rejects */ })
+
+    const start = Date.now()
+    const result = await recoverStaleMembers(db, client, undefined, 50)
+    expect(Date.now() - start).toBeLessThan(1000)
+
+    // The DB-only work (marking busy members as error) must still have
+    // completed and be reflected in the returned count, independent of
+    // whether the network-side abort ever settles.
+    expect(result.interrupted).toBe(1)
+    const alice = db.query("SELECT status FROM team_member WHERE name = ?").get("alice") as Record<string, string>
+    expect(alice.status).toBe("error")
+  })
+
   test("does not touch non-busy members", async () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "ready", "idle")
