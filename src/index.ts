@@ -196,6 +196,12 @@ const plugin: Plugin = async (input) => {
             }
           } else if (transition.to === "error") {
             notifyTeamEvent(client, "error", { memberName: transition.memberName })
+          } else if (transition.to === "busy") {
+            // Fresh busy period (ready/error -> busy) — give checkStalled a baseline
+            // that doesn't depend on a step-finish event having landed yet. Without
+            // this, a member whose first action is one long-running tool call is
+            // never detected as stalled until that call itself returns.
+            progressTracker.recordBusyStart(sessionID)
           } else if (transition.to === "retry") {
             // Teammate is being rate-limited — notify user
             try {
