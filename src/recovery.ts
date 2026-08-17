@@ -7,6 +7,61 @@ import { log } from "./log"
 import { runCommand } from "./process"
 
 /**
+ * Whether a session still exists in OpenCode. `client.session.get` throws for a
+ * deleted/unknown session rather than returning empty data -- see dashboard.ts's
+ * existing best-effort usage of the same call.
+ */
+export async function isSessionAlive(client: PluginClient, sessionId: string): Promise<boolean> {
+  try {
+    await client.session.get({ sessionID: sessionId })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Reconcile 'active' teams whose lead session no longer exists in OpenCode --
+ * e.g. the user deleted the session via OpenCode's own session UI/API, not via
+ * team_cleanup. Ensemble's own bookkeeping has no way to learn about that on its
+ * own: nothing tells it the session is gone, so the team row stays 'active'
+ * forever, blocking team_create ("already exists") and team_cleanup's purge path
+ * ("cannot purge active team" -- purge only operates on archived teams) for that
+ * name indefinitely. A team with no live lead session is unrecoverable through
+ * any legitimate path (there is no "reassign lead" tool), so archiving it directly
+ * is safe regardless of member state -- the existing recoverOrphanedWorktrees/
+ * recoverOrphanedBranches passes then naturally sweep up its resources on the same
+ * recovery cycle, since those already scope to archived teams with no active
+ * members.
+ *
+ * Scoped by cwd the same way recoverStaleMembers is, to avoid reconciling other
+ * projects' teams when multiple projects share one DB.
+ */
+export async function recoverOrphanedTeams(
+  db: Database,
+  client: PluginClient,
+  cwd?: string,
+  registry?: MemberRegistry,
+): Promise<{ archived: number }> {
+  const active = db.query(
+    `SELECT id, lead_session_id FROM team
+     WHERE status = 'active' AND (? IS NULL OR project_id = ? OR project_id = 'default')`
+  ).all(cwd ?? null, cwd ?? null) as Array<{ id: string; lead_session_id: string }>
+
+  let archived = 0
+  for (const team of active) {
+    if (await isSessionAlive(client, team.lead_session_id)) continue
+
+    db.run("UPDATE team SET status = 'archived', time_updated = ? WHERE id = ?", [Date.now(), team.id])
+    registry?.unregisterTeam(team.id)
+    archived++
+    log(`recovery:team:orphaned team_id=${team.id} lead_session=${team.lead_session_id}`)
+  }
+
+  return { archived }
+}
+
+/**
  * Scan for team members stuck in 'busy' status (stale from a crash)
  * and mark them as 'error' with execution_status 'idle'.
  * Preserves worktree branches before aborting orphaned sessions.

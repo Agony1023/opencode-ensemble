@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { applyMigrations } from "../src/schema"
-import { recoverStaleMembers, recoverUndeliveredMessages, rehydrateRegistry } from "../src/recovery"
+import { recoverStaleMembers, recoverUndeliveredMessages, rehydrateRegistry, recoverOrphanedTeams } from "../src/recovery"
 import type { PluginClient } from "../src/types"
 import { MemberRegistry } from "../src/state"
 import { sendMessage, broadcastMessage } from "../src/messaging"
@@ -71,6 +71,83 @@ function mockClient(): PluginClient & { calls: Array<{ method: string; args: unk
     },
   }
 }
+
+describe("recoverOrphanedTeams", () => {
+  let db: Database
+  let client: ReturnType<typeof mockClient>
+
+  beforeEach(() => {
+    db = setupDb()
+    client = mockClient()
+  })
+
+  test("archives an active team whose lead session no longer exists", async () => {
+    insertTeam(db, "t1", "dead-team", "dead-lead-sess")
+    client.session.get = async (options) => {
+      if (options.sessionID === "dead-lead-sess") throw new Error("session not found")
+      return { data: {} }
+    }
+
+    const result = await recoverOrphanedTeams(db, client)
+    expect(result.archived).toBe(1)
+
+    const row = db.query("SELECT status FROM team WHERE id = ?").get("t1") as { status: string }
+    expect(row.status).toBe("archived")
+  })
+
+  test("leaves an active team alone when its lead session is genuinely alive", async () => {
+    insertTeam(db, "t1", "live-team", "live-lead-sess")
+    // Default mock client.session.get always resolves.
+
+    const result = await recoverOrphanedTeams(db, client)
+    expect(result.archived).toBe(0)
+
+    const row = db.query("SELECT status FROM team WHERE id = ?").get("t1") as { status: string }
+    expect(row.status).toBe("active")
+  })
+
+  test("does not touch teams already archived", async () => {
+    insertTeam(db, "t1", "old-team", "dead-lead-sess")
+    db.run("UPDATE team SET status = 'archived' WHERE id = ?", ["t1"])
+    client.session.get = async () => { throw new Error("session not found") }
+
+    const result = await recoverOrphanedTeams(db, client)
+    expect(result.archived).toBe(0)
+  })
+
+  test("unregisters an archived team from the in-memory registry", async () => {
+    insertTeam(db, "t1", "dead-team", "dead-lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    client.session.get = async (options) => {
+      if (options.sessionID === "dead-lead-sess") throw new Error("session not found")
+      return { data: {} }
+    }
+    const registry = new MemberRegistry()
+    registry.register("t1", "alice", "sess-1")
+
+    await recoverOrphanedTeams(db, client, undefined, registry)
+
+    expect(registry.getBySession("sess-1")).toBeUndefined()
+  })
+
+  test("scopes to the given project when cwd is provided", async () => {
+    db.run(
+      "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)",
+      ["/tmp/other-project", "other-project", "/tmp/other-project", Date.now(), Date.now()]
+    )
+    db.run(
+      "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES (?, ?, ?, ?, 'active', 0, ?, ?)",
+      ["t2", "other-team", "/tmp/other-project", "dead-lead-sess-2", Date.now(), Date.now()]
+    )
+    client.session.get = async () => { throw new Error("session not found") }
+
+    const result = await recoverOrphanedTeams(db, client, "/tmp/other-project")
+    expect(result.archived).toBe(1)
+
+    const row = db.query("SELECT status FROM team WHERE id = ?").get("t2") as { status: string }
+    expect(row.status).toBe("archived")
+  })
+})
 
 describe("recoverStaleMembers", () => {
   let db: Database

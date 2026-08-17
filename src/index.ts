@@ -5,7 +5,7 @@ import path from "node:path"
 import { mkdirSync } from "node:fs"
 import { createDb, getDbPath } from "./db"
 import { wrapThrowingClient } from "./client"
-import { recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, rehydrateRegistry } from "./recovery"
+import { recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, recoverOrphanedTeams, rehydrateRegistry } from "./recovery"
 import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./state"
 import { isWorktreeInstance } from "./util"
 import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent } from "./hooks"
@@ -79,6 +79,16 @@ const plugin: Plugin = async (input) => {
   // calls back to the server, which deadlocks because the server is still handling session.create.
   if (!isWorktreeInstance(input.directory)) {
     log("init:recovery:start (main instance)")
+
+    // Run before anything else that reads t.status = 'active' -- a team whose
+    // lead session was deleted externally (not via team_cleanup) stays 'active'
+    // forever otherwise, blocking team_create/team_cleanup for that name across
+    // restarts. See recoverOrphanedTeams' own doc comment for the full mechanism.
+    const orphanedTeams = await recoverOrphanedTeams(db, client, input.directory, registry)
+    if (orphanedTeams.archived > 0) {
+      log(`init:recovery:orphaned-teams-archived=${orphanedTeams.archived}`)
+    }
+
     const recovery = await recoverStaleMembers(db, client, input.directory)
     if (recovery.interrupted > 0) {
       log(`init:recovery:interrupted=${recovery.interrupted}`)
