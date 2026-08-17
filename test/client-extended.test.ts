@@ -12,6 +12,7 @@ function fakeSDK(overrides: Record<string, unknown> = {}) {
       status: overrides["session.status"] ?? (async () => ({ data: {} })),
       messages: overrides["session.messages"] ?? (async () => ({ data: [] })),
       get: overrides["session.get"] ?? (async () => ({ data: {} })),
+      update: overrides["session.update"] ?? (async () => ({ data: {} })),
     },
     tui: {
       showToast: overrides["tui.showToast"] ?? (async () => ({ data: {} })),

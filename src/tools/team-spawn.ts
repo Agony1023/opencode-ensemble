@@ -165,6 +165,19 @@ export async function executeTeamSpawn(
     )
   }
 
+  // plan_approval is a technical write-deny, not just a system-prompt instruction — an
+  // earlier version of this relied on the prompt alone and provided zero real enforcement.
+  // Denies edit AND bash (bash can write files via shell redirection, which would otherwise
+  // bypass the edit-tool block entirely). Lifted on approval via session.update() in
+  // team-message.ts, which appends an "allow" rule — Permission.evaluate's findLast means
+  // the later-appended rule wins over this deny. Skipped when isReadOnly already denies both.
+  if (usePlanApproval && !isReadOnly) {
+    permission.push(
+      { permission: "edit", pattern: "*", action: "deny" },
+      { permission: "bash", pattern: "*", action: "deny" },
+    )
+  }
+
   permission.push(
     ...TEAM_TOOLS.map(t => ({ permission: t, pattern: "*", action: "allow" as const })),
   )

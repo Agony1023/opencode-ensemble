@@ -12,6 +12,7 @@ function fakeSDK(overrides: Record<string, unknown> = {}) {
       status: overrides["session.status"] ?? (async () => ({ data: {} })),
       messages: overrides["session.messages"] ?? (async () => ({ data: [] })),
       get: overrides["session.get"] ?? (async () => ({ data: {} })),
+      update: overrides["session.update"] ?? (async () => ({ data: {} })),
     },
     tui: {
       showToast: overrides["tui.showToast"] ?? (async () => ({ data: {} })),
@@ -60,6 +61,14 @@ describe("wrapThrowingClient", () => {
     expect(typeof client.session.promptAsync).toBe("function")
     expect(typeof client.session.abort).toBe("function")
     expect(typeof client.session.status).toBe("function")
+    expect(typeof client.session.update).toBe("function")
+  })
+
+  test("session.update error throws", async () => {
+    const client = wrapThrowingClient(fakeSDK({
+      "session.update": async () => ({ error: { message: "session not found" } }),
+    }))
+    await expect(client.session.update({ sessionID: "sess-1", permission: [] })).rejects.toThrow("session not found")
   })
 
   test("wraps all worktree methods", async () => {

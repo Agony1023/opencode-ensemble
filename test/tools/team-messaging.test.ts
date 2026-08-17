@@ -345,5 +345,44 @@ describe("team_message — plan approval", () => {
     await expect(executeTeamMessage(deps, { to: "alice", text: "ok", approve: true }, "sess-bob"))
       .rejects.toThrow("Only the lead can approve or reject")
   })
+
+  test("approve calls session.update to lift the edit/bash deny set at spawn", async () => {
+    deps.db.run("UPDATE team_member SET plan_approval = 'pending' WHERE team_id = ? AND name = ?", ["t1", "alice"])
+
+    await executeTeamMessage(deps, { to: "alice", text: "looks good", approve: true }, "lead-sess")
+
+    const updateCall = deps.client.calls.find(c => c.method === "session.update")
+    expect(updateCall).toBeDefined()
+    const opts = updateCall!.args[0] as { sessionID: string; permission?: Array<{ permission: string; pattern: string; action: string }> }
+    expect(opts.sessionID).toBe("sess-alice")
+    expect(opts.permission).toEqual([
+      { permission: "edit", pattern: "*", action: "allow" },
+      { permission: "bash", pattern: "*", action: "allow" },
+    ])
+  })
+
+  test("reject does NOT call session.update — deny stays in place", async () => {
+    deps.db.run("UPDATE team_member SET plan_approval = 'pending' WHERE team_id = ? AND name = ?", ["t1", "bob"])
+
+    await executeTeamMessage(deps, { to: "bob", text: "try again", reject: "needs more detail" }, "lead-sess")
+
+    const updateCall = deps.client.calls.find(c => c.method === "session.update")
+    expect(updateCall).toBeUndefined()
+  })
+
+  test("approve does NOT mark plan_approval as approved if session.update fails — silent-success-while-still-blocked is the exact bug this closes", async () => {
+    deps.db.run("UPDATE team_member SET plan_approval = 'pending' WHERE team_id = ? AND name = ?", ["t1", "alice"])
+    deps.client.session.update = async () => { throw new Error("server unreachable") }
+
+    await expect(executeTeamMessage(deps, { to: "alice", text: "looks good", approve: true }, "lead-sess"))
+      .rejects.toThrow("Plan was NOT approved")
+
+    const row = deps.db.query("SELECT plan_approval FROM team_member WHERE team_id = ? AND name = ?").get("t1", "alice") as { plan_approval: string }
+    expect(row.plan_approval).toBe("pending")
+
+    // No message should have been sent either — the whole operation aborted before that point.
+    const msgs = deps.db.query("SELECT content FROM team_message WHERE team_id = ?").all("t1") as Array<{ content: string }>
+    expect(msgs).toHaveLength(0)
+  })
 })
 

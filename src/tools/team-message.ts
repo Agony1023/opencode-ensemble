@@ -58,6 +58,26 @@ export async function executeTeamMessage(
       throw new Error(`Recipient "${args.to}" is not in plan approval mode (plan_approval is not pending).`)
     }
     if (args.approve) {
+      // Lift the technical write-deny set at spawn time (team-spawn.ts) by appending
+      // "allow" rules — session.update() merges (appends) onto the existing ruleset
+      // server-side rather than replacing it, and Permission.evaluate's findLast means
+      // the later-appended allow wins over the earlier deny for the same permission+pattern.
+      // If this call fails, the plan must NOT be marked approved — the teammate would stay
+      // technically blocked while the DB said otherwise, which is worse than not approving
+      // at all (silent-success-while-broken is exactly the failure mode this fix exists to close).
+      try {
+        await deps.client.session.update({
+          sessionID: recipientSessionId,
+          permission: [
+            { permission: "edit", pattern: "*", action: "allow" },
+            { permission: "bash", pattern: "*", action: "allow" },
+          ],
+        })
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        log(`team_message:approve:permission-update-failed to=${args.to} err=${errMsg}`)
+        throw new Error(`Failed to lift write restriction for "${args.to}": ${errMsg}. Plan was NOT approved — the teammate is still technically blocked from writing. Retry the approval.`)
+      }
       deps.db.run(
         "UPDATE team_member SET plan_approval = 'approved', time_updated = ? WHERE team_id = ? AND name = ?",
         [Date.now(), teamInfo.teamId, args.to]

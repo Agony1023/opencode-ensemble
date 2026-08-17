@@ -714,6 +714,43 @@ describe("team_spawn — agent mode enforcement", () => {
     expect(opts.agent).toBe("build")
     expect(opts.tools).toBeUndefined()
   })
+
+  test("build agent with plan_approval:true gets a real edit+bash deny on session.create, not just a prompt instruction", async () => {
+    await executeTeamSpawn(deps, { name: "builder", agent: "build", prompt: "Build it", plan_approval: true }, "lead-sess")
+
+    const createCall = deps.client.calls.find(c => c.method === "session.create")
+    const opts = createCall!.args[0] as { permission?: Array<{ permission: string; pattern: string; action: string }> }
+    // Worktree allow comes first (existing behavior), then the plan_approval deny appended
+    // after — later position wins under Permission.evaluate's findLast, so the deny is what
+    // actually governs until team_message's approve path lifts it via session.update.
+    expect(opts.permission).toEqual([
+      { permission: "edit", pattern: "/tmp/worktree-ensemble-test-project-my-team#t1-builder/**", action: "allow" },
+      { permission: "bash", pattern: "*", action: "allow" },
+      { permission: "edit", pattern: "*", action: "deny" },
+      { permission: "bash", pattern: "*", action: "deny" },
+      ...TEAM_TOOL_PERMISSIONS,
+    ])
+  })
+
+  test("plan agent with plan_approval:true does not double-append deny rules (isReadOnly already denies)", async () => {
+    await executeTeamSpawn(deps, { name: "planner", agent: "plan", prompt: "Plan it", plan_approval: true }, "lead-sess")
+
+    const createCall = deps.client.calls.find(c => c.method === "session.create")
+    const opts = createCall!.args[0] as { permission?: Array<{ permission: string; pattern: string; action: string }> }
+    expect(opts.permission).toEqual([
+      { permission: "edit", pattern: "*", action: "deny" },
+      { permission: "bash", pattern: "*", action: "deny" },
+      ...TEAM_TOOL_PERMISSIONS,
+    ])
+  })
+
+  test("build agent without plan_approval gets no edit/bash deny", async () => {
+    await executeTeamSpawn(deps, { name: "builder", agent: "build", prompt: "Build it" }, "lead-sess")
+
+    const createCall = deps.client.calls.find(c => c.method === "session.create")
+    const opts = createCall!.args[0] as { permission?: Array<{ permission: string; pattern: string; action: string }> }
+    expect(opts.permission?.some(p => p.action === "deny")).toBe(false)
+  })
 })
 
 describe("team_spawn — AGENTS.md NOT loaded into context", () => {

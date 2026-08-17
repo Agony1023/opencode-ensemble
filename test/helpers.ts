@@ -45,6 +45,10 @@ export function mockClient(): PluginClient & { calls: Array<{ method: string; ar
         calls.push({ method: "session.get", args: [options] })
         return { data: {} }
       },
+      async update(options) {
+        calls.push({ method: "session.update", args: [options] })
+        return { data: {} }
+      },
     },
     tui: {
       async showToast(options) {

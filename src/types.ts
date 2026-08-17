@@ -55,6 +55,15 @@ export interface PluginClient {
     status(): Promise<{ data?: Record<string, { type: string }> }>
     messages(options: { sessionID: string; limit?: number }): Promise<{ data?: Array<{ info: unknown; parts: unknown[] }> }>
     get(options: { sessionID: string }): Promise<{ data?: unknown }>
+    /**
+     * Update session properties. `permission` rules are MERGED (appended) onto the
+     * session's existing ruleset server-side, not replaced — confirmed against the
+     * real v1.18.15 server's `PATCH /session/{sessionID}` behavior. Because
+     * `Permission.evaluate` resolves via `findLast`, an appended rule for the same
+     * permission+pattern overrides an earlier one. This is how a plan-approval
+     * teammate's write-deny (set at spawn) gets lifted on approval — see team-message.ts.
+     */
+    update(options: { sessionID: string; title?: string; permission?: PermissionRule[] }): Promise<{ data?: unknown }>
   }
   tui: {
     showToast(options: {

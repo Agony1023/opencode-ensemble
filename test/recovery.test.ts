@@ -53,6 +53,7 @@ function mockClient(): PluginClient & { calls: Array<{ method: string; args: unk
       async status() { calls.push({ method: "session.status", args: [] }); return { data: {} } },
       async messages(options) { calls.push({ method: "session.messages", args: [options] }); return { data: [] } },
       async get(options) { calls.push({ method: "session.get", args: [options] }); return { data: {} } },
+      async update(options) { calls.push({ method: "session.update", args: [options] }); return { data: {} } },
     },
     tui: {
       async showToast(options) { calls.push({ method: "tui.showToast", args: [options] }); return {} },
