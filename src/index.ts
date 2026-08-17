@@ -5,7 +5,7 @@ import path from "node:path"
 import { mkdirSync } from "node:fs"
 import { createDb, getDbPath } from "./db"
 import { wrapThrowingClient } from "./client"
-import { recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, rehydrateRegistry } from "./recovery"
+import { recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, recoverOrphanedTeams, rehydrateRegistry } from "./recovery"
 import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./state"
 import { isWorktreeInstance } from "./util"
 import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent } from "./hooks"
@@ -79,6 +79,28 @@ const plugin: Plugin = async (input) => {
   // calls back to the server, which deadlocks because the server is still handling session.create.
   if (!isWorktreeInstance(input.directory)) {
     log("init:recovery:start (main instance)")
+
+    // Reconciles teams whose lead session was deleted externally (not via
+    // team_cleanup) -- otherwise they stay 'active' forever, blocking
+    // team_create/team_cleanup for that name across restarts. See
+    // recoverOrphanedTeams' own doc comment for the full mechanism.
+    //
+    // Fire-and-forget, NOT awaited: isSessionAlive() calls client.session.get(),
+    // an HTTP call back to this same server. Awaiting it synchronously here --
+    // before the server has finished bootstrapping -- reproduced a real,
+    // confirmed deadlock (server never responds to ANY request, including
+    // unrelated ones like /config) when a stale team from a prior run exists
+    // for this project. Matches the existing pattern for the other three
+    // non-critical recovery passes below, and the documented reason
+    // recoverStaleMembers is skipped entirely for worktree instances two lines
+    // up ("makes HTTP calls back to the server, which deadlocks"). isSessionAlive
+    // itself also carries a bounded timeout as defense in depth.
+    recoverOrphanedTeams(db, client, input.directory, registry).then((result) => {
+      if (result.archived > 0) log(`init:recovery:orphaned-teams-archived=${result.archived}`)
+    }).catch((err) => {
+      log(`init:recover-orphaned-teams:failed err=${err instanceof Error ? err.message : String(err)}`)
+    })
+
     const recovery = await recoverStaleMembers(db, client, input.directory)
     if (recovery.interrupted > 0) {
       log(`init:recovery:interrupted=${recovery.interrupted}`)

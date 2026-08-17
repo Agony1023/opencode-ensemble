@@ -7,6 +7,79 @@ import { log } from "./log"
 import { runCommand } from "./process"
 
 /**
+ * Whether a session still exists in OpenCode. `client.session.get` throws for a
+ * deleted/unknown session rather than returning empty data -- see dashboard.ts's
+ * existing best-effort usage of the same call.
+ *
+ * Bounded by a timeout: a `session.get` call made from within this plugin's own
+ * init sequence, before the server has finished bootstrapping, can hang the
+ * request indefinitely rather than resolve or reject -- the same class of
+ * self-referential-HTTP-call deadlock team-spawn.ts's own `withTimeout` exists
+ * to guard against for `worktree.create`/`session.create` ("makes HTTP calls
+ * back to the server, which deadlocks because the server is still handling
+ * session.create"). On timeout, treat liveness as UNKNOWN (return true, i.e.
+ * "assume alive, don't archive") rather than assuming dead -- a false negative
+ * here just means the orphan isn't reconciled this pass; a false positive means
+ * archiving a team that might still be genuinely active.
+ */
+export async function isSessionAlive(client: PluginClient, sessionId: string, timeoutMs = 5000): Promise<boolean> {
+  try {
+    await Promise.race([
+      client.session.get({ sessionID: sessionId }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("isSessionAlive timed out")), timeoutMs)),
+    ])
+    return true
+  } catch (err) {
+    if (err instanceof Error && err.message === "isSessionAlive timed out") {
+      log(`recovery:team:liveness-check-timeout session=${sessionId}`)
+      return true
+    }
+    return false
+  }
+}
+
+/**
+ * Reconcile 'active' teams whose lead session no longer exists in OpenCode --
+ * e.g. the user deleted the session via OpenCode's own session UI/API, not via
+ * team_cleanup. Ensemble's own bookkeeping has no way to learn about that on its
+ * own: nothing tells it the session is gone, so the team row stays 'active'
+ * forever, blocking team_create ("already exists") and team_cleanup's purge path
+ * ("cannot purge active team" -- purge only operates on archived teams) for that
+ * name indefinitely. A team with no live lead session is unrecoverable through
+ * any legitimate path (there is no "reassign lead" tool), so archiving it directly
+ * is safe regardless of member state -- the existing recoverOrphanedWorktrees/
+ * recoverOrphanedBranches passes then naturally sweep up its resources on the same
+ * recovery cycle, since those already scope to archived teams with no active
+ * members.
+ *
+ * Scoped by cwd the same way recoverStaleMembers is, to avoid reconciling other
+ * projects' teams when multiple projects share one DB.
+ */
+export async function recoverOrphanedTeams(
+  db: Database,
+  client: PluginClient,
+  cwd?: string,
+  registry?: MemberRegistry,
+): Promise<{ archived: number }> {
+  const active = db.query(
+    `SELECT id, lead_session_id FROM team
+     WHERE status = 'active' AND (? IS NULL OR project_id = ? OR project_id = 'default')`
+  ).all(cwd ?? null, cwd ?? null) as Array<{ id: string; lead_session_id: string }>
+
+  let archived = 0
+  for (const team of active) {
+    if (await isSessionAlive(client, team.lead_session_id)) continue
+
+    db.run("UPDATE team SET status = 'archived', time_updated = ? WHERE id = ?", [Date.now(), team.id])
+    registry?.unregisterTeam(team.id)
+    archived++
+    log(`recovery:team:orphaned team_id=${team.id} lead_session=${team.lead_session_id}`)
+  }
+
+  return { archived }
+}
+
+/**
  * Scan for team members stuck in 'busy' status (stale from a crash)
  * and mark them as 'error' with execution_status 'idle'.
  * Preserves worktree branches before aborting orphaned sessions.
