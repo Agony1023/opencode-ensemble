@@ -72,7 +72,7 @@ const plugin: Plugin = async (input) => {
   const rawClient = new OpencodeClient({ client: pluginTransport })
   initLog(rawClient)
   const client = wrapThrowingClient(rawClient)
-  const deps: ToolDeps = { db, registry, tracker, purgeApprovals, client, directory: input.directory, config }
+  const deps: ToolDeps = { db, registry, tracker, purgeApprovals, client, directory: input.directory, config, progressTracker }
 
   // Recovery only runs for the main project instance — NOT for teammate worktree instances.
   // Worktree instances are created during session.create. Running recovery there makes HTTP
