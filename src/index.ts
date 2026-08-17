@@ -469,8 +469,13 @@ const plugin: Plugin = async (input) => {
         },
         async execute(args, ctx) {
           const result = await executeTeamBroadcast(deps, args, ctx.sessionID)
-          // Track broadcast activity for stall detection
+          // Track broadcast activity for stall detection AND chatty detection --
+          // a broadcast reaches every teammate at once, arguably the most
+          // "chatty" action possible, and was previously invisible to
+          // checkChatty()'s peer-message rate limit (recordPeerMessage was never
+          // called here, only recordMessage).
           progressTracker.recordMessage(ctx.sessionID)
+          progressTracker.recordPeerMessage(ctx.sessionID)
           ctx.metadata({ title: "Broadcast to team" })
           return result
         },
