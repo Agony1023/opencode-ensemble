@@ -25,8 +25,8 @@ function insertMessage(db: Database, teamId: string, id: string, fromName: strin
 
 // biome-lint: use Record for JSON response shape
 interface HealthResponse { ensemble: boolean; pid: number }
-interface DashboardTeam { id: string; name: string; projectId: string; status: string; timeCreated: number; timeUpdated: number; members: Array<{ sessionId?: string } & Record<string, unknown>>; tasks: Array<Record<string, unknown>>; messages: Array<Record<string, unknown>> }
-interface StateResponse { projects: Array<{ id: string; name: string; path: string; activeTeams: number; workingAgents: number; teams: DashboardTeam[] }>; teams: DashboardTeam[] }
+interface DashboardTeam { id: string; name: string; projectId: string; leadSessionId?: string; status: string; timeCreated: number; timeUpdated: number; members: Array<{ sessionId?: string } & Record<string, unknown>>; tasks: Array<Record<string, unknown>>; messages: Array<Record<string, unknown>> }
+interface StateResponse { version: number; projects: Array<{ id: string; name: string; path: string; activeTeams: number; workingAgents: number; teams: DashboardTeam[] }>; teams: DashboardTeam[] }
 
 describe("dashboard", () => {
   let db: Database
@@ -63,7 +63,7 @@ describe("dashboard", () => {
       expect(res.status).toBe(200)
       expect(res.headers.get("access-control-allow-origin")).toBe("*")
       const body = (await res.json()) as StateResponse
-      expect(body).toEqual({ projects: [], teams: [] })
+      expect(body).toEqual({ version: 1, projects: [], teams: [] })
     })
 
     test("returns team with members, tasks, messages", async () => {
@@ -463,6 +463,34 @@ describe("dashboard", () => {
       const body = (await res.json()) as StateResponse
 
       expect(body.teams[0]!.members[0]!.sessionId).toBe("sess-a")
+    })
+  })
+
+  describe("state includes leadSessionId", () => {
+    test("team objects include leadSessionId, scoping to the session that created them", async () => {
+      insertTeam(db, "t1", "alpha", "lead-sess-a")
+      insertTeam(db, "t2", "beta", "lead-sess-b")
+
+      server = await startDashboard(db, port)
+      const res = await fetch(`http://localhost:${port}/api/state`)
+      const body = (await res.json()) as StateResponse
+
+      const teamA = body.teams.find((t) => t.id === "t1")
+      const teamB = body.teams.find((t) => t.id === "t2")
+      expect(teamA?.leadSessionId).toBe("lead-sess-a")
+      expect(teamB?.leadSessionId).toBe("lead-sess-b")
+    })
+  })
+
+  describe("state includes version", () => {
+    test("top-level response carries a bare-integer version field", async () => {
+      server = await startDashboard(db, port)
+      const res = await fetch(`http://localhost:${port}/api/state`)
+      const body = (await res.json()) as StateResponse & { version: number }
+
+      expect(typeof body.version).toBe("number")
+      expect(Number.isInteger(body.version)).toBe(true)
+      expect(body.version).toBe(1)
     })
   })
 
